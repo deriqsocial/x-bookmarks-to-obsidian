@@ -13,6 +13,8 @@ import re
 import json
 import glob
 import shutil
+import base64
+import mimetypes
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -39,6 +41,14 @@ SONNET_MODEL  = "claude-sonnet-4-6"
 OPUS_MODEL    = "claude-opus-4-6"
 SIZE_THRESHOLD_FOR_OPUS = 50000  # Use Opus for files > 50KB
 CHUNK_SIZE    = 30000            # Max chars per chunk for large file processing
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+IMAGE_MEDIA_TYPES = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif":  "image/gif",
+}
 
 
 # ─────────────────────────────────────────────
@@ -327,6 +337,197 @@ def compile_large_file(raw_content, metadata, index_content, agents_content, pri
 
 
 # ─────────────────────────────────────────────
+# IMAGE INGESTION (vision API path)
+# ─────────────────────────────────────────────
+
+def is_image_file(filepath):
+    """Return True if the file has a supported image extension."""
+    ext = os.path.splitext(filepath)[1].lower()
+    return ext in IMAGE_EXTENSIONS
+
+
+def extract_image_metadata(filepath):
+    """
+    Build a metadata dict for an image file without reading pixel data.
+    Mirrors the shape returned by extract_metadata() for text files.
+    """
+    filename = os.path.basename(filepath)
+    stem = os.path.splitext(filename)[0]
+    date = datetime.now().strftime("%Y-%m-%d")
+    return {
+        "title":        stem.replace("_", " ").replace("-", " "),
+        "source_type":  "image",
+        "date":         date,
+        "key_topics":   [],
+        "key_entities": [],
+        "word_count":   0,
+        "language":     "en",
+        "frontmatter":  {},
+    }
+
+
+def compile_image_with_vision(filepath, metadata, index_content, agents_content, priorities, model=SONNET_MODEL):
+    """
+    Send an image to Claude's vision API and return the same JSON structure
+    as compile_with_sonnet() — entity pages, concept pages, source page with wikilinks.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    media_type = IMAGE_MEDIA_TYPES.get(ext, "image/jpeg")
+
+    with open(filepath, "rb") as f:
+        image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+    focus = (priorities or "")[:300]
+    index_snippet = index_content[:500]
+    date  = metadata.get("date", datetime.now().strftime("%Y-%m-%d"))
+    title = metadata.get("title", os.path.basename(filepath))[:120]
+
+    system = f"""You are a knowledge-base compiler. Analyse the provided image and convert its content into Obsidian wiki pages.
+
+Rules:
+- Use [[wikilinks]] for every named concept, person, tool, or entity.
+- Every wiki page needs YAML frontmatter: title, type (concept/entity/source), tags, created, updated, sources.
+- Be concise — each wiki page should be 150-400 words max.
+- Return ONLY a valid JSON object. No preamble, no postamble, no markdown fences.
+
+Current focus areas: {focus}
+
+Existing index entries (excerpt):
+{index_snippet}"""
+
+    user_text = f"""Ingest this image and return wiki pages.
+
+Image filename: {os.path.basename(filepath)} | Date: {date}
+
+Please:
+1. Extract any text visible in the image (OCR).
+2. Identify entities: people, companies, tools, products mentioned or shown.
+3. Identify key concepts and themes.
+4. Produce wiki pages covering the source image plus any notable entities/concepts found.
+
+Return JSON:
+{{"log_entry":"## [{date}] ingest | {title[:60]}","index_updates":"","wiki_files":[{{"path":"type/slug.md","mode":"create","content":"---\ntitle: ...\ntype: ...\ntags: []\ncreated: {date}\nupdated: {date}\nsources: []\n---\n\n# Title\n\nContent with [[wikilinks]]."}}]}}"""
+
+    # Load API key
+    try:
+        env_text = open(ENV_FILE).read()
+        m = re.search(r'ANTHROPIC_API_KEY="?(sk-ant-[^"\s]+)"?', env_text)
+        api_key = m.group(1) if m else os.environ.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    content_str = ""
+    try:
+        if _HAS_SDK:
+            client = _anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=model,
+                max_tokens=8192,
+                system=system,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_data,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
+                    ],
+                }],
+                temperature=0.3,
+            )
+            content_str = response.content[0].text
+        else:
+            data = json.dumps({
+                "model": model,
+                "system": system,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_data,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
+                    ],
+                }],
+                "temperature": 0.3,
+                "max_tokens": 8192,
+            }).encode()
+            req = urllib.request.Request(
+                ANTHROPIC_API_URL, data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                }
+            )
+            with urllib.request.urlopen(req, timeout=120) as r:
+                result = json.loads(r.read().decode())
+                content_str = result["content"][0]["text"]
+
+        # Bulletproof JSON extraction
+        start_idx = content_str.find('{')
+        end_idx = content_str.rfind('}')
+        if start_idx != -1 and end_idx != -1:
+            content_str = content_str[start_idx:end_idx+1]
+        return json.loads(content_str)
+
+    except json.JSONDecodeError as e:
+        print(f"[Vision] JSON parse failed: {e}")
+        print(f"[Vision] Raw (first 300): {repr(content_str[:300])}")
+        return None
+    except Exception as e:
+        print(f"[Vision] Failed: {type(e).__name__}: {e}")
+        return None
+
+
+def process_image_file(filepath, priorities, index_content, agents_content):
+    """Process a single image file through the vision API path."""
+    filename = os.path.basename(filepath)
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {filename} (image)")
+
+    metadata = extract_image_metadata(filepath)
+    file_size = os.path.getsize(filepath)
+    print(f"  type=image  size={file_size:,} bytes  date={metadata['date']}")
+    print(f"  title: {metadata['title'][:80]}")
+
+    # Use Opus for larger images, Sonnet for smaller ones
+    model = OPUS_MODEL if file_size > 1_000_000 else SONNET_MODEL
+    print(f"  → analysing with Claude {'Opus' if model == OPUS_MODEL else 'Sonnet'} vision...")
+    compiled = compile_image_with_vision(filepath, metadata, index_content, agents_content, priorities, model=model)
+
+    status = "Success" if compiled else "Failed"
+    now_date = datetime.now().strftime("%Y-%m-%d")
+    now_time = datetime.now().strftime("%H:%M:%S")
+    with open(TRACKING_CSV, "a") as f:
+        f.write(f"{now_date},{now_time},\"{filename}\",0,\"image\",\"{status}\"\n")
+
+    if not compiled:
+        print(f"  x vision compilation failed — leaving in 01_Raw/")
+        return False
+
+    write_wiki_files(compiled)
+    shutil.move(filepath, os.path.join(PROCESSED_DIR, filename))
+    print(f"  ✓ moved to processed/")
+    return True
+
+
+# ─────────────────────────────────────────────
 # FILE WRITER
 # ─────────────────────────────────────────────
 
@@ -423,15 +624,22 @@ if __name__ == "__main__":
         except (IndexError, ValueError):
             pass
 
-    files = sorted(f for f in glob.glob(os.path.join(RAW_DIR, "*.md")) if os.path.isfile(f))
-    if not files:
-        print("No .md files in 01_Raw/. Nothing to do.")
+    md_files = sorted(f for f in glob.glob(os.path.join(RAW_DIR, "*.md")) if os.path.isfile(f))
+    image_files = sorted(
+        f for ext in IMAGE_EXTENSIONS
+        for f in glob.glob(os.path.join(RAW_DIR, f"*{ext}"))
+        if os.path.isfile(f)
+    )
+    all_files = md_files + image_files
+
+    if not all_files:
+        print("No .md or image files in 01_Raw/. Nothing to do.")
         sys.exit(0)
 
     if limit:
-        files = files[:limit]
+        all_files = all_files[:limit]
 
-    print(f"Found {len(files)} file(s) to process.")
+    print(f"Found {len(md_files)} markdown and {len(image_files)} image file(s) to process.")
 
     # Load shared context once
     index_content  = open(INDEX_FILE).read() if os.path.exists(INDEX_FILE) else ""
@@ -443,8 +651,13 @@ if __name__ == "__main__":
     # Process
     success = 0
     consecutive_failures = 0
-    for filepath in files:
-        if process_file(filepath, priorities, index_content, agents_content):
+    for filepath in all_files:
+        if is_image_file(filepath):
+            ok = process_image_file(filepath, priorities, index_content, agents_content)
+        else:
+            ok = process_file(filepath, priorities, index_content, agents_content)
+
+        if ok:
             success += 1
             consecutive_failures = 0
             # Refresh index so each file benefits from what was just written
@@ -456,4 +669,4 @@ if __name__ == "__main__":
                 print(f"\nx 2 consecutive failures — aborting run.")
                 break
 
-    print(f"\nIngestion complete: {success}/{len(files)} files processed.")
+    print(f"\nIngestion complete: {success}/{len(all_files)} files processed.")

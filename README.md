@@ -1,5 +1,7 @@
 # X Bookmarks → Obsidian Knowledge Base
 
+![banner](2026-04-08-x-bookmarks-banner.png)
+
 Turn your X (Twitter) bookmarks into a searchable, interconnected wiki — automatically. Every bookmark becomes a structured note. Every article linked in a tweet gets fetched and summarized. Claude compiles everything into an Obsidian vault with wikilinks, tags, and a navigable knowledge graph.
 
 83% of bookmarks are never revisited. You save things because they matter, then never see them again. This pipeline changes that — your bookmarks become knowledge you can actually use.
@@ -12,7 +14,7 @@ A two-script pipeline:
 
 1. **`fetch_bookmarks.py`** — Pulls your X bookmarks via the API. For each bookmark, it fetches the full tweet text, any quoted tweet, thread context if it's a reply, and the full content of any linked articles (via [trafilatura](https://trafilatura.readthedocs.io/)). Saves everything as rich markdown files in `vault/01_Raw/`.
 
-2. **`ingest.py`** — Reads those raw files and sends them to Claude Sonnet. Claude compiles each one into wiki pages with YAML frontmatter, proper wikilinks (`[[like this]]`), tags, and cross-references. Pages land in `vault/02_Wiki/` and move automatically through the pipeline.
+2. **`ingest.py`** — Reads those raw files and sends them to Claude Sonnet. Claude compiles each one into wiki pages with YAML frontmatter, proper wikilinks (`[[like this]]`), tags, and cross-references. Pages land in `vault/02_Wiki/` and move automatically through the pipeline. Also supports images — drop a `.png`, `.jpg`, or `.webp` into `01_Raw/` and Claude Vision extracts the text, entities, and concepts from it.
 
 3. **`synthesize.py`** (optional) — Reads all wiki pages created in the last 7 days and asks Claude to write a narrative synthesis: what patterns are emerging, what concepts keep appearing, what connections exist across your bookmarks. Output goes to `vault/03_Outputs/`.
 
@@ -46,7 +48,7 @@ Each raw file gets moved to `vault/01_Raw/processed/` after ingestion, so re-run
 **Requirements:** Python 3.8+, an X Developer account, an Anthropic API key.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/x-bookmarks-to-obsidian.git
+git clone https://github.com/deriqsocial/x-bookmarks-to-obsidian.git
 cd x-bookmarks-to-obsidian
 pip install trafilatura anthropic
 ```
@@ -157,7 +159,7 @@ python3 synthesize.py
 ## Requirements
 
 - Python 3.8+
-- `pip install trafilatura anthropic`
+- `pip install trafilatura anthropic` (no extra dependencies for image support — uses stdlib `base64`)
 - X Developer account (free tier works, just apply at developer.twitter.com)
 - Anthropic API key (pay-per-use, ingesting 100 bookmarks costs roughly $0.50-2.00 depending on article length)
 

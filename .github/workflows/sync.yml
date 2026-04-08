@@ -49,6 +49,12 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 ingest.py
 
+      - name: Synthesize weekly patterns
+        env:
+          VAULT_PATH: ./vault
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 synthesize.py --days 7
+
       - name: Commit and push new wiki pages
         run: |
           git config user.email "actions@github.com"
