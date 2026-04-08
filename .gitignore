@@ -1,0 +1,8 @@
+.env
+.seen_bookmarks.json
+vault/01_Raw/*.md
+vault/01_Raw/processed/
+vault/pipeline_tracking.csv
+__pycache__/
+*.pyc
+.DS_Store
