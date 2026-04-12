@@ -8,13 +8,26 @@ Turn your X (Twitter) bookmarks into a searchable, interconnected wiki — autom
 
 ---
 
+## Features
+
+- **Deep article fetching** — Every URL in a bookmarked tweet is fetched and extracted (via trafilatura). You get the full article text, not just the tweet.
+- **Thread context** — If you bookmark a reply, the pipeline walks up the conversation chain and includes parent tweets for context.
+- **Quoted tweet expansion** — Quote tweets are fully expanded with the quoted content, including any articles or media the quoted tweet linked to.
+- **Image OCR** — Screenshots, charts, infographics, and photos attached to bookmarked tweets are downloaded and analyzed with Claude Vision. Text, entities, and concepts are extracted automatically.
+- **X Articles** — Full-text X Articles (Twitter's Medium-like long-form posts) are fetched via the API when present.
+- **LLM output linting** — Claude-generated wiki pages are automatically cleaned of preambles ("Of course! Here is..."), placeholder dates, and empty sections.
+- **Auto-refresh tokens** — OAuth2 tokens expire every 2 hours. The pipeline refreshes them automatically and saves the new tokens back to `.env`.
+- **Obsidian-native** — The vault folder is a valid Obsidian vault. Open it and you get graph view, backlinks, search, and tags with zero config.
+
+---
+
 ## What This Is
 
 A two-script pipeline:
 
-1. **`fetch_bookmarks.py`** — Pulls your X bookmarks via the API. For each bookmark, it fetches the full tweet text, any quoted tweet, thread context if it's a reply, and the full content of any linked articles (via [trafilatura](https://trafilatura.readthedocs.io/)). Saves everything as rich markdown files in `vault/01_Raw/`.
+1. **`fetch_bookmarks.py`** — Pulls your X bookmarks via the API. For each bookmark, it fetches the full tweet text, any quoted tweet, thread context if it's a reply, the full content of any linked articles (via [trafilatura](https://trafilatura.readthedocs.io/)), **and any attached images** (photos, screenshots, charts). Images are downloaded alongside the tweet markdown with matching filenames. Saves everything as rich markdown files in `vault/01_Raw/`.
 
-2. **`ingest.py`** — Reads those raw files and sends them to Claude Sonnet. Claude compiles each one into wiki pages with YAML frontmatter, proper wikilinks (`[[like this]]`), tags, and cross-references. Pages land in `vault/02_Wiki/` and move automatically through the pipeline. Also supports images — drop a `.png`, `.jpg`, or `.webp` into `01_Raw/` and Claude Vision extracts the text, entities, and concepts from it.
+2. **`ingest.py`** — Reads those raw files and sends them to Claude Sonnet. Claude compiles each one into wiki pages with YAML frontmatter, proper wikilinks (`[[like this]]`), tags, and cross-references. **Images are processed with Claude Vision** — OCR extracts visible text, entities, and concepts from screenshots, charts, and infographics. **LLM output is automatically linted** to strip preambles, placeholder dates, and empty sections. Pages land in `vault/02_Wiki/` and move automatically through the pipeline.
 
 3. **`synthesize.py`** (optional) — Reads all wiki pages created in the last 7 days and asks Claude to write a narrative synthesis: what patterns are emerging, what concepts keep appearing, what connections exist across your bookmarks. Output goes to `vault/03_Outputs/`.
 
@@ -161,7 +174,7 @@ python3 synthesize.py
 - Python 3.8+
 - `pip install trafilatura anthropic` (no extra dependencies for image support — uses stdlib `base64`)
 - X Developer account (free tier works, just apply at developer.twitter.com)
-- Anthropic API key (pay-per-use, ingesting 100 bookmarks costs roughly $0.50-2.00 depending on article length)
+- Anthropic API key (pay-per-use, ingesting 100 bookmarks costs roughly $0.50-2.00 depending on article length and image count; images add ~$0.02-0.05 per photo via Claude Vision)
 
 See [docs/setup-twitter-oauth.md](docs/setup-twitter-oauth.md) for step-by-step instructions on getting your X credentials.
 

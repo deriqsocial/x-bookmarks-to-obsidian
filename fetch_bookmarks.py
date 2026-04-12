@@ -109,8 +109,9 @@ def get_user_id(oauth2_token):
 def fetch_bookmarks(user_id, oauth2_token, max_results=100):
     params = urllib.parse.urlencode({
         "max_results": min(max_results, 100),
-        "tweet.fields": "created_at,author_id,text,note_tweet,referenced_tweets,article,entities,in_reply_to_user_id,conversation_id",
-        "expansions": "referenced_tweets.id,referenced_tweets.id.author_id,author_id,article.cover_media",
+        "tweet.fields": "created_at,author_id,text,note_tweet,referenced_tweets,article,entities,in_reply_to_user_id,conversation_id,attachments",
+        "expansions": "referenced_tweets.id,referenced_tweets.id.author_id,author_id,article.cover_media,attachments.media_keys",
+        "media.fields": "url,preview_image_url,type",
         "user.fields": "username,name",
     })
     url = f"https://api.twitter.com/2/users/{user_id}/bookmarks?{params}"
@@ -251,10 +252,27 @@ def extract_plaintext_urls(text, already_known):
     return found
 
 # ─────────────────────────────────────────────
+# MEDIA DOWNLOAD
+# ─────────────────────────────────────────────
+
+def download_media(url, output_path, timeout=20):
+    """Download a media file from URL to local path."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            with open(output_path, "wb") as f:
+                f.write(r.read())
+        return True
+    except Exception as e:
+        print(f"    x media download failed: {e}")
+        return False
+
+# ─────────────────────────────────────────────
 # MARKDOWN BUILDER
 # ─────────────────────────────────────────────
 
-def build_markdown(tweet, users_map, referenced_map, bearer_token):
+def build_markdown(tweet, users_map, referenced_map, media_map, bearer_token, base_filename):
     tweet_id = tweet["id"]
     author_id = tweet.get("author_id", "")
     author = users_map.get(author_id, {})
@@ -418,6 +436,43 @@ def build_markdown(tweet, users_map, referenced_map, bearer_token):
             for u in media_urls[:5]:
                 lines.append(f"- {u}")
 
+    # ── Media attachments (images/videos) ── download to 01_Raw/ with matching filename
+    attachments = tweet.get("attachments", {})
+    media_keys = attachments.get("media_keys", [])
+    if media_keys:
+        downloaded_files = []
+        for i, media_key in enumerate(media_keys[:4]):  # max 4 images
+            media_obj = media_map.get(media_key, {})
+            media_url = media_obj.get("url")  # direct image URL
+            media_type = media_obj.get("type", "photo")
+            
+            if not media_url and media_type == "photo":
+                # For photos, Twitter sometimes only provides preview_image_url
+                media_url = media_obj.get("preview_image_url")
+            
+            if media_url and media_type in ["photo", "animated_gif"]:
+                # Determine file extension from URL
+                ext = ".jpg"
+                if ".png" in media_url.lower():
+                    ext = ".png"
+                elif ".gif" in media_url.lower():
+                    ext = ".gif"
+                elif ".webp" in media_url.lower():
+                    ext = ".webp"
+                
+                # Build output filename: same base as the .md file + _img{i} + ext
+                media_filename = f"{base_filename}_img{i}{ext}"
+                media_path = os.path.join(RAW_DIR, media_filename)
+                
+                print(f"    → downloading media {i+1}/{len(media_keys)}: {media_url[:60]}...")
+                if download_media(media_url, media_path):
+                    downloaded_files.append(media_filename)
+        
+        if downloaded_files:
+            lines += ["", "## Media Files", ""]
+            for mf in downloaded_files:
+                lines.append(f"- `{mf}`")
+
     return "\n".join(lines)
 
 # ─────────────────────────────────────────────
@@ -496,6 +551,7 @@ def main():
 
     users_map = {u["id"]: u for u in includes.get("users", [])}
     referenced_map = {t["id"]: t for t in includes.get("tweets", [])}
+    media_map = {m["media_key"]: m for m in includes.get("media", [])}
 
     os.makedirs(RAW_DIR, exist_ok=True)
     new_count = 0
@@ -516,10 +572,11 @@ def main():
         username = users_map.get(author_id, {}).get("username", "unknown")
         date = tweet.get("created_at", "")[:10].replace("-", "")
         fname = f"tweet_{date}_{username}_{tweet_id}.md"
+        base_filename = fname.replace(".md", "")  # base name for media files
         fpath = os.path.join(RAW_DIR, fname)
 
         print(f"  + {fname}")
-        md = build_markdown(tweet, users_map, referenced_map, bearer_token)
+        md = build_markdown(tweet, users_map, referenced_map, media_map, bearer_token, base_filename)
 
         with open(fpath, "w") as f:
             f.write(md)

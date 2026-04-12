@@ -18,6 +18,7 @@ import mimetypes
 import urllib.request
 import urllib.error
 from datetime import datetime
+from pathlib import Path
 
 try:
     import anthropic as _anthropic
@@ -501,6 +502,15 @@ def process_image_file(filepath, priorities, index_content, agents_content):
     filename = os.path.basename(filepath)
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {filename} (image)")
 
+    # Symlink defense: reject symlinks before reading
+    if Path(filepath).is_symlink():
+        print(f"  x skipped (symlink): {filepath}")
+        now_date = datetime.now().strftime("%Y-%m-%d")
+        now_time = datetime.now().strftime("%H:%M:%S")
+        with open(TRACKING_CSV, "a") as f:
+            f.write(f'{now_date},{now_time},"{filename}",0,"symlink","Skipped"\n')
+        return False
+
     metadata = extract_image_metadata(filepath)
     file_size = os.path.getsize(filepath)
     print(f"  type=image  size={file_size:,} bytes  date={metadata['date']}")
@@ -528,6 +538,56 @@ def process_image_file(filepath, priorities, index_content, agents_content):
 
 
 # ─────────────────────────────────────────────
+# SECURITY & LINT (adapted from gbrain v0.9.1)
+# ─────────────────────────────────────────────
+
+def lint_wiki_content(content):
+    """
+    Strip LLM preambles, code fence wrapping, and normalize spacing.
+    Returns cleaned content ready for disk write.
+    """
+    # LLM preamble patterns
+    preambles = [
+        r'^Of course\.?\s*Here is (?:a |the )?(?:detailed |comprehensive |updated )?(?:wiki )?page[^.\n]*\.?\s*\n*',
+        r'^Certainly\.?\s*Here is[^.\n]*\.?\s*\n*',
+        r'^Here is (?:a |the )?(?:detailed |comprehensive |updated )?(?:wiki )?page[^.\n]*\.?\s*\n*',
+        r"^I've (?:created|updated|written|prepared) (?:a |the )?(?:detailed |comprehensive )?(?:wiki )?page[^.\n]*\.?\s*\n*",
+        r'^Sure(?:!|,)?\s*Here (?:is|are)[^.\n]*\.?\s*\n*',
+        r'^Absolutely\.?\s*Here[^.\n]*\.?\s*\n*',
+    ]
+    
+    cleaned = content
+    for pattern in preambles:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Strip wrapping code fences (```markdown ... ```)
+    cleaned = re.sub(r'^```(?:markdown|md)\s*\n', '', cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r'\n```\s*$', '', cleaned)
+    
+    # Normalize excessive blank lines left by removals
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    
+    return cleaned.strip() + '\n'
+
+def validate_wiki_path(frontmatter, expected_path):
+    """
+    Slug poisoning defense: ensure frontmatter slug matches expected path.
+    Returns (is_valid, error_message).
+    """
+    fm_slug = frontmatter.get('slug', '')
+    if not fm_slug:
+        return True, None  # No slug declared, path is authority
+    
+    # Normalize both for comparison
+    expected_normalized = expected_path.replace('\\', '/').lower()
+    fm_normalized = fm_slug.replace('\\', '/').lower()
+    
+    if fm_normalized != expected_normalized:
+        return False, f"Frontmatter slug '{fm_slug}' does not match expected path '{expected_path}'. Rejecting to prevent page hijacking."
+    
+    return True, None
+
+# ─────────────────────────────────────────────
 # FILE WRITER
 # ─────────────────────────────────────────────
 
@@ -536,15 +596,35 @@ def write_wiki_files(compiled):
         path = wfile.get("path", "")
         if not path:
             continue
+        
+        # Slug poisoning defense: parse frontmatter and validate
+        content = wfile["content"]
+        fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+        if fm_match:
+            fm_text = fm_match.group(1)
+            fm = {}
+            for line in fm_text.splitlines():
+                if ':' in line:
+                    k, _, v = line.partition(':')
+                    fm[k.strip()] = v.strip().strip('"').strip("'")
+            
+            valid, error = validate_wiki_path(fm, path)
+            if not valid:
+                print(f"  x skipped {path}: {error}")
+                continue
+        
+        # Lint: strip LLM artifacts before write
+        content = lint_wiki_content(content)
+        
         full_path = os.path.join(WIKI_DIR, path)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         mode = wfile.get("mode", "create")
         if mode == "append" and os.path.exists(full_path):
             with open(full_path, "a") as f:
-                f.write("\n\n---\n\n" + wfile["content"])
+                f.write("\n\n---\n\n" + content)
         else:
             with open(full_path, "w") as f:
-                f.write(wfile["content"])
+                f.write(content)
         print(f"  → wrote {path}")
 
     idx = compiled.get("index_updates", "").strip()
@@ -566,6 +646,15 @@ def write_wiki_files(compiled):
 def process_file(filepath, priorities, index_content, agents_content):
     filename = os.path.basename(filepath)
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {filename}")
+
+    # Symlink defense: reject symlinks before reading content
+    if Path(filepath).is_symlink():
+        print(f"  x skipped (symlink): {filepath}")
+        now_date = datetime.now().strftime("%Y-%m-%d")
+        now_time = datetime.now().strftime("%H:%M:%S")
+        with open(TRACKING_CSV, "a") as f:
+            f.write(f'{now_date},{now_time},"{filename}",0,"symlink","Skipped"\n')
+        return False
 
     with open(filepath, "r", errors="replace") as f:
         raw_content = f.read()
@@ -624,11 +713,12 @@ if __name__ == "__main__":
         except (IndexError, ValueError):
             pass
 
-    md_files = sorted(f for f in glob.glob(os.path.join(RAW_DIR, "*.md")) if os.path.isfile(f))
+    # Symlink defense: filter out symlinks at collection time (double-check)
+    md_files = sorted(f for f in glob.glob(os.path.join(RAW_DIR, "*.md")) if os.path.isfile(f) and not Path(f).is_symlink())
     image_files = sorted(
         f for ext in IMAGE_EXTENSIONS
         for f in glob.glob(os.path.join(RAW_DIR, f"*{ext}"))
-        if os.path.isfile(f)
+        if os.path.isfile(f) and not Path(f).is_symlink()
     )
     all_files = md_files + image_files
 
