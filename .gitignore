@@ -1,5 +1,9 @@
 .env
-.seen_bookmarks.json
+# NOTE: .seen_bookmarks.json is intentionally tracked. It is the only thing
+# that makes the daily sync incremental — if it isn't committed, every CI run
+# starts with an empty seen-set and re-fetches + re-bills Claude for the same
+# ~100 bookmarks. It contains only tweet IDs (the vault content is already
+# committed), so tracking it leaks nothing the repo doesn't already expose.
 vault/01_Raw/*.md
 vault/01_Raw/processed/
 vault/pipeline_tracking.csv
