@@ -43,6 +43,35 @@ jobs:
           VAULT_PATH: ./vault
         run: python3 fetch_bookmarks.py
 
+      # X's OAuth2 refresh tokens ROTATE on use: fetch_bookmarks.py refreshes the
+      # 2-hour access token (and receives a new refresh token) and writes both into
+      # .env. But .env is recreated from secrets every run, so without this step the
+      # rotated refresh token is discarded and auth dies permanently after one cycle.
+      # GITHUB_TOKEN cannot write secrets by design, so this requires a separate PAT
+      # (fine-grained, Secrets: read/write) stored as the GH_PAT secret. If GH_PAT is
+      # absent the step no-ops, so the workflow still runs (until the next rotation).
+      - name: Persist rotated OAuth tokens back to secrets
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_PAT:-}" ]; then
+            echo "GH_PAT not set — skipping token persistence."
+            echo "Refresh-token rotation will not survive to the next run until GH_PAT is configured."
+            exit 0
+          fi
+          access=$(grep '^TWITTER_OAUTH2_ACCESS_TOKEN=' .env | cut -d= -f2-)
+          refresh=$(grep '^TWITTER_OAUTH2_REFRESH_TOKEN=' .env | cut -d= -f2-)
+          if [ -n "$access" ]; then
+            printf '%s' "$access"  | gh secret set TWITTER_OAUTH2_ACCESS_TOKEN
+            echo "Updated TWITTER_OAUTH2_ACCESS_TOKEN secret."
+          fi
+          if [ -n "$refresh" ]; then
+            printf '%s' "$refresh" | gh secret set TWITTER_OAUTH2_REFRESH_TOKEN
+            echo "Updated TWITTER_OAUTH2_REFRESH_TOKEN secret."
+          fi
+
       - name: Ingest into wiki
         env:
           VAULT_PATH: ./vault

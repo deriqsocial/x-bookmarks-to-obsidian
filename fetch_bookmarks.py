@@ -231,8 +231,18 @@ def is_fetchable_url(url):
     ]
     try:
         parsed = urllib.parse.urlparse(url)
-        domain = parsed.netloc.lower().lstrip("www.")
-        return not any(skip in domain for skip in skip_domains)
+        domain = parsed.netloc.lower().split(":")[0]  # drop any :port
+        # Strip a www. prefix. NOTE: not lstrip("www.") — lstrip strips a *set* of
+        # characters, so "wired.com".lstrip("www.") => "ired.com".
+        if domain.startswith("www."):
+            domain = domain[4:]
+        # Match by exact host or subdomain suffix, NOT substring. The old
+        # `skip in domain` matched "t.co" inside "washingtonpost.com" (the
+        # "t.co" of "...post.com"), silently dropping every *t.com domain.
+        return not any(
+            domain == skip or domain.endswith("." + skip)
+            for skip in skip_domains
+        )
     except Exception:
         return False
 

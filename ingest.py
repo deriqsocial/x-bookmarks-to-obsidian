@@ -615,8 +615,17 @@ def write_wiki_files(compiled):
         
         # Lint: strip LLM artifacts before write
         content = lint_wiki_content(content)
-        
+
         full_path = os.path.join(WIKI_DIR, path)
+        # Path-traversal defense: `path` is model-emitted and the model is fed
+        # untrusted content (web articles, image OCR). os.path.join silently honors
+        # absolute paths and ".." segments, so confirm the resolved target stays
+        # inside WIKI_DIR before writing.
+        wiki_root = os.path.realpath(WIKI_DIR)
+        resolved = os.path.realpath(full_path)
+        if resolved != wiki_root and not resolved.startswith(wiki_root + os.sep):
+            print(f"  x skipped {path}: resolves outside vault (path traversal)")
+            continue
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         mode = wfile.get("mode", "create")
         if mode == "append" and os.path.exists(full_path):
